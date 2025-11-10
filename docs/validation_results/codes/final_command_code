@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+import pandas as pd
+import numpy as np
+import joblib
+from datetime import datetime
+from pathlib import Path
+
+MODEL_PATHS = {
+    'recent': ['satellite_xgboost_artifacts.pkl'],
+    'upcoming': ['upcoming_anomaly_model.pkl'
+
+def load_model(paths):
+    for p in paths:
+        path = Path(p)
+        if path.exists():
+            return joblib.load(path)
+    raise FileNotFoundError("Model not found in any expected path")
+
+recent_artifacts = load_model(MODEL_PATHS['recent'])
+upcoming_artifacts = load_model(MODEL_PATHS['upcoming'])
+
+recent_model = recent_artifacts['model']
+recent_scaler = recent_artifacts['scaler']
+recent_le = recent_artifacts['label_encoder']
+feature_cols = recent_artifacts['features']
+numeric_cols = recent_artifacts['numeric_cols']
+
+upcoming_model = upcoming_artifacts['model']
+upcoming_scaler = upcoming_artifacts['scaler']
+upcoming_le = upcoming_artifacts['label_encoder']
+
+ACTION_DB = {
+    "Normal": ("OBC", "LOW", "None", "Continue normal operations. Increase logging."),
+    "Sensor_Drift": ("OBC", "LOW", "Overtemperature", "Increase thermal logging + enable watchdog"),
+    "Voltage_Fluctuation": ("PDU", "LOW", "Overvoltage", "High-res rail sampling + log ripple"),
+    "Voltage_Sag": ("PDU", "MEDIUM", "Undervoltage", "Shed non-critical loads | Restart converter | ALERT"),
+    "Solar_Flare_Interference": ("PDU", "MEDIUM", "Overvoltage", "Reduce setpoint | Shed loads | Run diagnostics"),
+    "Thermal_Instability": ("OBC", "HIGH", "Overtemperature", "Safe firmware | Disable radios | REDUNDANT OBC | HIGH ALERT"),
+    "Overheating": ("OBC", "CRITICAL", "Overtemperature", "HARD RESET | FALLBACK MCU | SAFE MODE | EMERGENCY BEACON"),
+    "Upcoming_Normal": ("OBC", "LOW", "None", "Monitor only. No action required."),
+    "Upcoming_Sensor_Drift": ("OBC", "LOW", "Overtemperature", "Pre-warm watchdog | Increase thermal sampling"),
+    "Upcoming_Voltage_Fluctuation": ("PDU", "LOW", "Overvoltage", "Pre-log rail stability | Increase sampling rate"),
+    "Upcoming_Voltage_Sag": ("PDU", "MEDIUM", "Undervoltage", "Pre-shed non-critical loads | Prepare converter restart"),
+    "Upcoming_Solar_Flare_Interference": ("PDU", "MEDIUM", "Overvoltage", "Pre-reduce bus voltage | Alert ground (forecast)"),
+    "Upcoming_Thermal_Instability": ("OBC", "HIGH", "Overtemperature", "Pre-throttle CPU | Pause ML | REDUNDANT OBC READY"),
+    "Upcoming_Overheating": ("OBC", "CRITICAL", "Overtemperature", "IMMINENT FAILURE | AUTO SAFE MODE | EMERGENCY BEACON"),
+}
+
+def get_telemetry():
+    data = {}
+    print("Enter current telemetry values:")
+    for col in feature_cols:
+        while True:
+            try:
+                val = input(f"  {col:15}: ").strip()
+                if not val:
+                    raise ValueError("Empty input")
+                if col in ['anomaly_obc', 'anomaly_pdu']:
+                    data[col] = int(float(val))
+                else:
+                    data[col] = float(val)
+                break
+            except ValueError:
+                print("   Invalid input. Enter a number.")
+    return pd.DataFrame([data])
+
+def predict(model, scaler, X):
+    X_scaled = X.copy()
+    X_scaled[numeric_cols] = scaler.transform(X_scaled[numeric_cols])
+    proba = model.predict_proba(X_scaled)[0]
+    pred_idx = np.argmax(proba)
+    return pred_idx, proba
+
+def run_diagnosis():
+    print("\n" + "="*70)
+    print("SATELLITE DUAL-MODEL DIAGNOSIS CENTER")
+    print("="*70)
+
+    df = get_telemetry()
+
+    idx_r, proba_r = predict(recent_model, recent_scaler, df)
+    current_class = recent_le.inverse_transform([idx_r])[0]
+    current_conf = proba_r[idx_r]
+
+    idx_u, proba_u = predict(upcoming_model, upcoming_scaler, df)
+    upcoming_raw = upcoming_le.inverse_transform([idx_u])[0]
+    upcoming_class = f"Upcoming_{upcoming_raw}"
+    upcoming_score = int(proba_u[idx_u] * 100)
+
+    curr_act = ACTION_DB.get(current_class, ("Unknown", "LOW", "Error", "Contact engineering"))
+    up_act = ACTION_DB.get(upcoming_class, ("Unknown", "LOW", "Error", "Contact engineering"))
+
+    print(f"\nCURRENT STATE")
+    print(f"  Root Cause : {current_class}")
+    print(f"  Confidence : {current_conf:.1%}")
+    print(f"  Component  : {curr_act[0]}")
+    print(f"  Risk Level : {curr_act[1]}")
+    print(f"  Anomaly    : {curr_act[2]}")
+    print(f"  ACTION     : {curr_act[3]}")
+
+    print(f"\nUPCOMING PREDICTION (5–15 min)")
+    print(f"  Forecast   : {upcoming_raw}")
+    print(f"  Risk Score : {upcoming_score}%")
+    print(f"  Component  : {up_act[0]}")
+    print(f"  Risk Level : {up_act[1]}")
+    print(f"  Anomaly    : {up_act[2]}")
+    print(f"  PREEMPTIVE : {up_act[3]}")
+
+    top_alt = np.argsort(proba_r)[-2:][::-1]
+    print(f"\nTOP ALTERNATIVES (Current):")
+    for i in top_alt:
+        if i != idx_r:
+            print(f"  • {recent_le.classes_[i]:25} → {proba_r[i]:.1%}")
+
+    print(f"\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
+    print("Actions dispatched. Awaiting telemetry.")
+    print("="*70)
+
+if _name_ == "_main_":
+    print("Dual-model command center online.\n")
+    try:
+        while True:
+            run_diagnosis()
+            if input("\nRun again? (y/n): ").strip().lower() != 'y':
+                print("\nCommand center offline.")
+                break
+    except KeyboardInterrupt:
+        print("\n\nInterrupted. Shutting down safely.")
+    except Exception as e:
+        print(f"\nCritical error: {e}")
+        print("System halted. Contact engineering.")
